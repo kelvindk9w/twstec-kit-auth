@@ -15,14 +15,27 @@ use Twstec\Kit\Auth\Exceptions\TwoFactorLockedException;
 use Twstec\Kit\Auth\Services\TwoFactorLogin;
 use Twstec\Kit\Auth\Support\PendingTwoFactorLogin;
 use Twstec\Kit\Auth\Support\UserModel;
+use Twstec\Kit\Foundation\Security\ClientBucket;
 
 /**
  * Regra do login por senha (sessão web) — sem resposta HTTP: quem chama
  * escolhe a resposta pelo resultado (contratos LoginResponse e
  * TwoFactorRequiredResponse).
  *
- * - Bloqueio por tentativas: contador via RateLimiter, chaveado por e-mail +
- *   IP, com decay configurável (config auth.login).
+ * - Bloqueio por tentativas, em duas camadas (config auth.login), na mesma
+ *   janela (AUTH_LOGIN_LOCKOUT_MINUTES):
+ *     1. por e-mail + CLIENTE (ClientBucket: IPv4 exato, IPv6 pelo prefixo) —
+ *        AUTH_LOGIN_MAX_ATTEMPTS, o limite apertado de quem erra a própria
+ *        senha;
+ *     2. por CONTA (só o e-mail normalizado) — AUTH_LOGIN_MAX_ATTEMPTS_PER_ACCOUNT,
+ *        mais alto: o teto de quem testa senhas de UMA conta a partir de
+ *        muitos IPs (botnet, rotação de IPv6). Sem ele, cada IP novo ganharia
+ *        orçamento novo contra a mesma conta.
+ *   Conta inexistente também conta (anti-enumeração: o bloqueio é igual).
+ *   O preço da camada 2: quem conhece o e-mail de alguém consegue mantê-lo
+ *   bloqueado por janelas seguidas. O bloqueio é temporário e a redefinição
+ *   de senha por e-mail zera o contador da conta (ResetPassword) — a dona da
+ *   conta tem por onde entrar.
  * - Deny-by-default: somente contas ativas autenticam.
  * - Anti-enumeração: a mesma mensagem para e-mail inexistente ou senha errada.
  * - Login regenera o ID da sessão (fixation).
@@ -49,25 +62,29 @@ final class AttemptLogin
 
         $credentials = ['email' => $email, 'password' => $password];
 
-        $user = UserModel::query()->where('email', $email)->first();
-
-        // Credenciais válidas mas conta inativa: mensagem específica (o
-        // atacante já saberia as credenciais — não há vazamento adicional).
-        if ($user !== null && ! $user->isActive() && Auth::validate($credentials)) {
-            throw ValidationException::withMessages([
-                'email' => __('auth.account_inactive'),
-            ]);
-        }
-
+        // A senha é conferida UMA vez, em qualquer caso: conferir de novo só
+        // para a conta inativa daria a ela um tempo de resposta próprio (dois
+        // hashes lentos em vez de um) e denunciaria, pelo relógio, quais
+        // e-mails são de contas bloqueadas.
         if (! Auth::validate($credentials)) {
-            RateLimiter::hit($this->throttleKey($request, $email), $this->decaySeconds());
+            $this->recordFailedAttempt($request, $email);
 
             throw ValidationException::withMessages([
                 'email' => __('auth.failed'),
             ]);
         }
 
-        RateLimiter::clear($this->throttleKey($request, $email));
+        $user = UserModel::query()->where('email', $email)->first();
+
+        // Credenciais válidas mas conta inativa: mensagem específica (o
+        // atacante já saberia as credenciais — não há vazamento adicional).
+        if ($user === null || ! $user->isActive()) {
+            throw ValidationException::withMessages([
+                'email' => __('auth.account_inactive'),
+            ]);
+        }
+
+        $this->clearFailedAttempts($request, $email);
 
         /** @var AuthUser $user */
         if ($this->twoFactor->enabledFor($user)) {
@@ -85,12 +102,29 @@ final class AttemptLogin
     }
 
     /**
-     * Chave do limiter: e-mail (normalizado) + IP — um atacante distribuído
-     * não pode testar senhas da mesma conta trocando de IP à vontade.
+     * Chave do limite apertado: e-mail (normalizado) + cliente. O cliente é
+     * o ClientBucket (IPv4 exato, IPv6 pelo prefixo): trocar de endereço
+     * dentro do próprio /64 não dá orçamento novo. Trocar de IP de verdade
+     * dá — quem segura o ataque distribuído é o limite por conta
+     * (accountThrottleKey).
      */
     public function throttleKey(Request $request, string $email): string
     {
-        return 'login|'.Str::transliterate(Str::lower($email)).'|'.$request->ip();
+        return 'login|'.self::normalizeEmail($email).'|'.ClientBucket::for($request);
+    }
+
+    /**
+     * Chave do limite por CONTA: só o e-mail normalizado, de qualquer origem.
+     * Pública e estática para a redefinição de senha zerar o contador.
+     */
+    public static function accountThrottleKey(string $email): string
+    {
+        return 'login-account|'.self::normalizeEmail($email);
+    }
+
+    private static function normalizeEmail(string $email): string
+    {
+        return Str::transliterate(Str::lower($email));
     }
 
     /**
@@ -118,22 +152,60 @@ final class AttemptLogin
     }
 
     /**
-     * Bloqueio após N tentativas (config auth.login.max_attempts).
+     * Senha errada (ou conta inexistente): conta nas duas camadas.
+     *
+     * Pública para o OUTRO login por senha do kit — o do /admin
+     * (twstec/kit-admin) — contar nos MESMOS contadores: quem testa senhas não
+     * ganha orçamento novo alternando entre /login e /admin/login.
+     */
+    public function recordFailedAttempt(Request $request, string $email): void
+    {
+        RateLimiter::hit($this->throttleKey($request, $email), $this->decaySeconds());
+        RateLimiter::hit(self::accountThrottleKey($email), $this->decaySeconds());
+    }
+
+    /**
+     * Senha certa: zera as duas camadas (o login do /admin também chama).
+     */
+    public function clearFailedAttempts(Request $request, string $email): void
+    {
+        RateLimiter::clear($this->throttleKey($request, $email));
+        RateLimiter::clear(self::accountThrottleKey($email));
+    }
+
+    /**
+     * Bloqueio após N tentativas do mesmo cliente (auth.login.max_attempts)
+     * ou M tentativas contra a mesma conta, de qualquer origem
+     * (auth.login.max_attempts_per_account). A mensagem é a mesma nos dois
+     * casos — e para conta inexistente.
+     *
+     * Pública para o login do /admin aplicar a mesma regra; `$field` é o
+     * campo que recebe a mensagem (no formulário do Filament, `data.email`).
      *
      * @throws ValidationException
      */
-    private function ensureIsNotRateLimited(Request $request, string $email): void
+    public function ensureIsNotRateLimited(Request $request, string $email, string $field = 'email'): void
     {
-        $maxAttempts = (int) config('auth.login.max_attempts', 5);
+        $seconds = null;
 
-        if (! RateLimiter::tooManyAttempts($this->throttleKey($request, $email), $maxAttempts)) {
+        $clientKey = $this->throttleKey($request, $email);
+
+        if (RateLimiter::tooManyAttempts($clientKey, max(1, (int) config('auth.login.max_attempts', 5)))) {
+            $seconds = RateLimiter::availableIn($clientKey);
+        }
+
+        $accountKey = self::accountThrottleKey($email);
+
+        if (RateLimiter::tooManyAttempts($accountKey, max(1, (int) config('auth.login.max_attempts_per_account', 20)))) {
+            $seconds = max($seconds ?? 0, RateLimiter::availableIn($accountKey));
+        }
+
+        if ($seconds === null) {
             return;
         }
 
-        $seconds = RateLimiter::availableIn($this->throttleKey($request, $email));
-
         throw ValidationException::withMessages([
-            'email' => __('auth.throttle', [
+            $field => __('auth.throttle', [
                 'seconds' => $seconds,
                 'minutes' => (int) ceil($seconds / 60),
             ]),

@@ -8,6 +8,7 @@ use Symfony\Component\HttpFoundation\Response;
 use Twstec\Kit\Auth\Contracts\Responses\LoginResponse;
 use Twstec\Kit\Auth\Http\Middleware\EnsureAccountIsActive;
 use Twstec\Kit\Auth\Http\Middleware\EnsureEmailIsVerified;
+use Twstec\Kit\Auth\Http\Middleware\EnsureSessionIsCurrent;
 use Twstec\Kit\Auth\Http\Middleware\EnsureTwoFactorIsConfigured;
 use Twstec\Kit\Auth\Http\Middleware\RequiresSensitiveActionToken;
 use Twstec\Kit\Auth\Providers\AuthServiceProvider;
@@ -26,7 +27,7 @@ it('traz a configuração padrão das chaves do kit dentro de config(auth)', fun
         ->and(config('auth.two_factor.max_attempts_per_account'))->toBe(10)
         ->and(config('auth.verification.max_attempts'))->toBe(5)
         ->and(config('auth.email_verification.required'))->toBeTrue()
-        ->and(config('auth.password_rules.min_length'))->toBe(6)
+        ->and(config('auth.password_rules.min_length'))->toBe(8)
         ->and(config('auth.web_protections.enabled'))->toBeTrue()
         // As do framework continuam lá.
         ->and(config('auth.defaults.guard'))->toBe('web');
@@ -66,10 +67,12 @@ it('põe o status da conta no FIM do grupo web e instala os aliases do kit', fun
     $kernel = app(Kernel::class);
     $web = $kernel->getMiddlewareGroups()['web'];
 
-    // O status da conta, e depois dele só a outra barreira do pacote (o
-    // segundo fator obrigatório): conta inativa sai antes.
-    expect(array_slice($web, -2))->toBe([EnsureAccountIsActive::class, EnsureTwoFactorIsConfigured::class])
+    // O status da conta, e depois dele só as outras barreiras do pacote (a
+    // sessão aberta com credencial que já mudou e o segundo fator
+    // obrigatório): conta inativa sai antes.
+    expect(array_slice($web, -3))->toBe([EnsureAccountIsActive::class, EnsureSessionIsCurrent::class, EnsureTwoFactorIsConfigured::class])
         ->and(array_count_values($web)[EnsureAccountIsActive::class])->toBe(1)
+        ->and(array_count_values($web)[EnsureSessionIsCurrent::class])->toBe(1)
         ->and(array_count_values($web)[EnsureTwoFactorIsConfigured::class])->toBe(1)
         ->and($kernel->getMiddlewareAliases()['verified'])->toBe(EnsureEmailIsVerified::class)
         ->and($kernel->getMiddlewareAliases()['sensitive.token'])->toBe(RequiresSensitiveActionToken::class);

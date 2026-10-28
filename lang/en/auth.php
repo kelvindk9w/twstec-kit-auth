@@ -14,6 +14,7 @@ return [
     'account_inactive' => 'This account is not active. Please contact support.',
     'registered' => 'Account created successfully. Welcome!',
     'logged_out' => 'Signed out successfully.',
+    'session_ended' => 'Your session was ended because the password or two-step verification of the account changed. Please sign in again.',
     'password_policy' => [
         'min' => 'at least :min characters',
         'with' => ':min, with :rules',
@@ -31,6 +32,9 @@ return [
         'invalid_link' => 'This confirmation link is invalid or has expired. Request a new one below.',
         'not_verified' => 'Confirm your email to continue.',
         'wrong_account' => 'This link belongs to another account. Sign out and sign in with the account that received the email.',
+    ],
+    'password_confirmation' => [
+        'locked' => 'Too many incorrect password attempts. For your security, wait :minutes minute(s) and try again.',
     ],
     'transaction_password' => [
         'invalid' => 'The provided transaction password is incorrect.',

@@ -14,6 +14,7 @@ return [
     'account_inactive' => 'Esta cuenta no está activa. Contacta con soporte.',
     'registered' => 'Cuenta creada con éxito. ¡Bienvenido(a)!',
     'logged_out' => 'Sesión cerrada con éxito.',
+    'session_ended' => 'Tu sesión se cerró porque la contraseña o la verificación en dos pasos de la cuenta cambió. Inicia sesión de nuevo.',
     'password_policy' => [
         'min' => 'mínimo :min caracteres',
         'with' => ':min, con :rules',
@@ -31,6 +32,9 @@ return [
         'invalid_link' => 'Este enlace de confirmación no es válido o expiró. Solicita uno nuevo abajo.',
         'not_verified' => 'Confirma tu correo para continuar.',
         'wrong_account' => 'Este enlace es de otra cuenta. Cierra sesión e ingresa con la cuenta que recibió el correo.',
+    ],
+    'password_confirmation' => [
+        'locked' => 'Demasiados intentos con contraseña incorrecta. Por seguridad, espera :minutes minuto(s) e inténtalo de nuevo.',
     ],
     'transaction_password' => [
         'invalid' => 'La contraseña de transacción ingresada es incorrecta.',
